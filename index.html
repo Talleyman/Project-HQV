@@ -203,6 +203,7 @@ class BootScene extends Phaser.Scene {
     // Tileset image used by the hub map
     this.load.image("basictiles", "assets/tiles/basictiles.png");
     this.load.image("tilesetGreen", "assets/tiles/tileset_green.png");
+    this.load.image("tilesetGray", "assets/tiles/tileset_gray.png");
 
     // Player sprite (we’ll use the transparent one)
     this.load.image("playerSheet", "assets/sprites/sprite_no_bg.png");
@@ -255,6 +256,7 @@ class WorldScene extends Phaser.Scene {
     });
 
   this.roomId = (data && data.roomId) ? data.roomId : "hub";
+  this.spawnName = (data && data.spawn) ? data.spawn : "spawn";
 
   // --- TILEMAP (from Tiled JSON) ---
   const mapKey = this.roomId;     // roomId should be "hub", "shrineA", etc.
@@ -266,16 +268,18 @@ class WorldScene extends Phaser.Scene {
   // - First arg: tileset NAME inside Tiled (from hub_map.json -> tilesets[0].name)
   // - Second arg: key from this.load.image(...)
   //const tileset = tiledMap.addTilesetImage("tileset_green", "tilesetGreen");
-  const tsGreen = tiledMap.addTilesetImage("tileset_green", "tilesetGreen");
-  const tsBasic = tiledMap.addTilesetImage("basictiles", "basictiles");
+  const tilesetImageKeys = {
+    tileset_green: "tilesetGreen",
+    tileset_gray: "tilesetGray",
+    basictiles: "basictiles",
+  };
+  const tilesets = tiledMap.tilesets
+    .map((ts) => tiledMap.addTilesetImage(ts.name, tilesetImageKeys[ts.name]))
+    .filter(Boolean);
 
-  // Layer names MUST match Tiled exactly (case + spaces)
-  const groundLayer = tiledMap.createLayer("Ground Layer", [tsGreen, tsBasic], 0, 0);
-  const decorLayer  = tiledMap.createLayer("Decor Layer",  [tsGreen, tsBasic], 0, 0);
-
-  // Enable collisions on any layer that contains tiles with collides=true
-  groundLayer.setCollisionByProperty({ collides: true });
-  decorLayer.setCollisionByProperty({ collides: true });
+  const tileLayers = tiledMap.layers
+    .filter((layer) => layer.type === "tilelayer")
+    .map((layer) => tiledMap.createLayer(layer.name, tilesets, 0, 0));
 
   // World bounds = map size
   this.physics.world.setBounds(0, 0, tiledMap.widthInPixels, tiledMap.heightInPixels);
@@ -283,10 +287,11 @@ class WorldScene extends Phaser.Scene {
   // --- Spawn from Object Layer ---
   // Object layer name MUST match Tiled exactly
   const objectsLayer = tiledMap.getObjectLayer("Object Layer");
-  const spawnObj = objectsLayer?.objects?.find(o => o.name === "spawn"); // recommend lowercase "spawn"
+  const spawnObj = objectsLayer?.objects?.find(o => o.name === this.spawnName)
+    || objectsLayer?.objects?.find(o => o.name === "spawn");
 
-  const spawnX = spawnObj ? spawnObj.x : 100;
-  const spawnY = spawnObj ? spawnObj.y : 200;
+  const spawnX = spawnObj ? spawnObj.x : tiledMap.widthInPixels / 2;
+  const spawnY = spawnObj ? spawnObj.y : tiledMap.heightInPixels - 48;
 
   // --- Player sprite ---
   split2x2Sprite(this, "playerSheet", 512, 512);
@@ -296,13 +301,16 @@ class WorldScene extends Phaser.Scene {
   this.player.setCollideWorldBounds(true);
 
   // Player collisions with tile layers
-  this.physics.add.collider(this.player, groundLayer);
-  this.physics.add.collider(this.player, decorLayer);
+  tileLayers.forEach((layer) => {
+    layer.setCollisionByExclusion([-1]);
+    this.physics.add.collider(this.player, layer);
+  });
 
   // --- Interactables (keep for now; later we’ll move these into Tiled objects) ---
   // NOTE: Your old Rooms[] coords are in a 700x520 world; they won't match a 704x512 tilemap unless you update them.
   // For now you can comment these out to avoid “invisible” triggers placed in the wrong spot.
-  this.interactables = this.physics.add.staticGroup();
+  this.interactables = [];
+  this.createMapDoors(objectsLayer, tiledMap);
   //this.altarObj = null;
   //this.altarLabel = null;
 
@@ -319,6 +327,36 @@ class WorldScene extends Phaser.Scene {
 
   this.updateAltarVisibility();
 }
+
+  createMapDoors(objectsLayer, tiledMap) {
+    if (objectsLayer?.objects?.length) {
+      objectsLayer.objects.forEach((obj) => {
+        const propMap = Object.fromEntries((obj.properties || []).map((p) => [p.name, p.value]));
+        if (!propMap.to) return;
+
+        this.interactables.push({
+          kind: "door",
+          to: propMap.to,
+          label: `Go to ${propMap.to}`,
+          x: obj.x + (obj.width || 0) / 2,
+          y: obj.y + (obj.height || 0) / 2,
+          radius: Math.max(18, obj.width || 0, obj.height || 0),
+        });
+      });
+    }
+
+    // shrineA currently has no object layer; provide a fallback return point.
+    if (!this.interactables.length && this.roomId === "shrineA") {
+      this.interactables.push({
+        kind: "door",
+        to: "hub",
+        label: "Return to hub",
+        x: tiledMap.widthInPixels / 2,
+        y: tiledMap.heightInPixels - 24,
+        radius: 36,
+      });
+    }
+  }
 
   transitionToRoom(toRoomId, spawnName = "spawn") {
     // prevent double-triggering
@@ -374,6 +412,12 @@ class WorldScene extends Phaser.Scene {
 
   consumeTouchA(){ if(!this.touch.a) return false; this.touch.a=false; return true; }
 
+  getInteractValue(obj, key) {
+    if (!obj) return undefined;
+    if (typeof obj.getData === "function") return obj.getData(key);
+    return obj[key];
+  }
+
   update(){
     const speed=120;
     const left=this.keys.left.isDown||this.keys.left2.isDown||this.touch.left;
@@ -403,34 +447,34 @@ class WorldScene extends Phaser.Scene {
 
     // Nearest interactable
     let near=null, best=Infinity;
-    this.interactables.getChildren().forEach(obj=>{
-      if(!obj.visible) return;
+    this.interactables.forEach(obj=>{
       const d=Phaser.Math.Distance.Between(this.player.x,this.player.y,obj.x,obj.y);
-      if(d<82 && d<best){ best=d; near=obj; }
+      if(d<obj.radius && d<best){ best=d; near=obj; }
     });
 
     if(near){
-      const kind=near.getData("kind");
+      const kind=near.kind;
       if(kind==="sign") this.prompt.setText("Press SPACE / tap A to read");
-      if(kind==="door") this.prompt.setText("Press SPACE / tap A to go: "+near.getData("label"));
+      if(kind==="door") this.prompt.setText("Press SPACE / tap A to go: "+near.label);
       if(kind==="shrine"){
-        const id=near.getData("id");
-        this.prompt.setText(GameState.puzzleDone[id] ? (near.getData("label")+" complete ✓") : ("Press SPACE / tap A to enter "+near.getData("label")));
+        const id=this.getInteractValue(near, "id");
+        const label=this.getInteractValue(near, "label");
+        this.prompt.setText(GameState.puzzleDone[id] ? (label+" complete ✓") : ("Press SPACE / tap A to enter "+label));
       }
       if(kind==="altar") this.prompt.setText("Press SPACE / tap A to assemble the heart");
     } else this.prompt.setText("");
 
     const interact = Phaser.Input.Keyboard.JustDown(this.keys.space) || this.consumeTouchA();
     if(interact && near){
-      const kind=near.getData("kind");
-      if(kind==="sign"){ this.scene.start("Dialog",{returnTo:{scene:"World",roomId:this.roomId},title:"Sign",body:near.getData("text")}); return; }
+      const kind=near.kind;
+      if(kind==="sign"){ this.scene.start("Dialog",{returnTo:{scene:"World",roomId:this.roomId},title:"Sign",body:this.getInteractValue(near, "text")}); return; }
       if (kind === "door") {
-        const toRoom = near.getData("to");
-        const spawnName = near.getData("spawn") || "spawn";
+        const toRoom = near.to;
+        const spawnName = near.spawn || "spawn";
         this.transitionToRoom(toRoom, spawnName);
         return;
       }
-      if(kind==="shrine"){ const id=near.getData("id"); if(!GameState.puzzleDone[id]) this.scene.start("Puzzle"+id); return; }
+      if(kind==="shrine"){ const id=this.getInteractValue(near, "id"); if(!GameState.puzzleDone[id]) this.scene.start("Puzzle"+id); return; }
       if(kind==="altar"){ this.scene.start("Final"); return; }
     }
 
