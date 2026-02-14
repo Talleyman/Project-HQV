@@ -1,0 +1,470 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no" />
+  <title>Heart Quest</title>
+  <style>
+    html, body { margin:0; padding:0; background:#0f0f12; height:100%; overflow:hidden; }
+    canvas { display:block; margin:0 auto; touch-action:none; }
+  </style>
+  <script src="https://cdn.jsdelivr.net/npm/phaser@3.80.1/dist/phaser.min.js"></script>
+</head>
+<body>
+<script>
+/**
+ * Heart Quest — LttP-style mini adventure (draft)
+ * - Desktop: WASD/Arrows + Space
+ * - Mobile: on-screen D-pad + A button
+ * - Replay seed: ?seed=0214 or ?seed=VALENTINE
+ */
+
+// ---------- Seeded RNG ----------
+function xmur3(str){let h=1779033703^str.length;for(let i=0;i<str.length;i++){h=Math.imul(h^str.charCodeAt(i),3432918353);h=(h<<13)|(h>>>19);}return function(){h=Math.imul(h^(h>>>16),2246822507);h=Math.imul(h^(h>>>13),3266489909);return (h^=(h>>>16))>>>0;};}
+function mulberry32(a){return function(){let t=(a+=0x6D2B79F5);t=Math.imul(t^(t>>>15),t|1);t^=t+Math.imul(t^(t>>>7),t|61);return ((t^(t>>>14))>>>0)/4294967296;};}
+function getSeedString(){const url=new URL(window.location.href);return (url.searchParams.get("seed")||"0214").toString();}
+function makeRng(seedStr){const seedHash=xmur3(seedStr)();const rng=mulberry32(seedHash);rng.int=(min,max)=>Math.floor(rng()*(max-min+1))+min;rng.pick=(arr)=>arr[rng.int(0,arr.length-1)];rng.shuffle=(arr)=>{for(let i=arr.length-1;i>0;i--){const j=rng.int(0,i);[arr[i],arr[j]]=[arr[j],arr[i]];}return arr;};return rng;}
+
+// ---------- Global state ----------
+const GameState = {
+  seed: getSeedString(),
+  rng: null,
+  hearts: 0,
+  totalHearts: 4,
+  puzzleDone: { A:false, B:false, C:false, D:false },
+  params: {},
+};
+
+function initRunParams(){
+  GameState.rng = makeRng(GameState.seed);
+  const r = GameState.rng;
+
+  const symbols = ["▲","●","■","◆","★"];
+  GameState.params.puzzleAOrder = r.shuffle(symbols.slice()).slice(0,4);
+  GameState.params.puzzleBCode = [r.int(1,9), r.int(0,9), r.int(0,9), r.int(0,9)].join("");
+
+  const notes = ["U","D","L","R"];
+  GameState.params.puzzleCMelody = Array.from({length:4}, ()=> r.pick(notes));
+
+  const words1 = ["HOME","HEART","FOREVER","ALWAYS","CHOICE"];
+  const words2 = ["YOU","US","MINE","OURS","TRUE"];
+  const words3 = ["SMILE","LIGHT","QUEST","SONG","KISS"];
+  GameState.params.puzzleDWords = [r.pick(words1), r.pick(words2), r.pick(words3)];
+}
+initRunParams();
+
+// ---------- UI helpers ----------
+function addPanel(scene,x,y,w,h,alpha=0.85){
+  const g=scene.add.graphics();
+  g.fillStyle(0x000000,alpha); g.fillRoundedRect(x,y,w,h,12);
+  g.lineStyle(2,0xffffff,0.18); g.strokeRoundedRect(x,y,w,h,12);
+  return g;
+}
+function centerText(scene,x,y,text,size=20){
+  return scene.add.text(x,y,text,{
+    fontFamily:"system-ui, -apple-system, Segoe UI, Roboto, Arial",
+    fontSize:size+"px", color:"#fff", align:"center",
+    wordWrap:{width:660}
+  }).setOrigin(0.5);
+}
+function smallText(scene,x,y,text){
+  return scene.add.text(x,y,text,{
+    fontFamily:"system-ui, -apple-system, Segoe UI, Roboto, Arial",
+    fontSize:"14px", color:"#ddd", wordWrap:{width:660}
+  });
+}
+
+// ---------- Tilemap (runtime tiles so no assets needed yet) ----------
+const TILE = 32;
+const MAP_W = 22; // 704px
+const MAP_H = 16; // 512px
+const ROOM_W = MAP_W * TILE;
+const ROOM_H = MAP_H * TILE;
+
+function ensureRuntimeTiles(scene){
+  if (scene.textures.exists("tiles")) return;
+
+  const ctex = scene.textures.createCanvas("tiles", TILE*4, TILE);
+  const ctx = ctex.getContext();
+
+  // Tile 0: floor
+  ctx.fillStyle="#2a2a35"; ctx.fillRect(0,0,TILE,TILE);
+  ctx.fillStyle="rgba(255,255,255,0.06)";
+  for(let i=0;i<6;i++){ ctx.fillRect((i*5)%TILE,(i*9)%TILE,3,3); }
+
+  // Tile 1: wall
+  ctx.fillStyle="#3a3a4a"; ctx.fillRect(TILE,0,TILE,TILE);
+  ctx.fillStyle="rgba(0,0,0,0.25)";
+  ctx.fillRect(TILE,0,TILE,6); ctx.fillRect(TILE,0,6,TILE);
+
+  // Tile 2: accent floor
+  ctx.fillStyle="#262630"; ctx.fillRect(TILE*2,0,TILE,TILE);
+  ctx.fillStyle="rgba(255,255,255,0.04)";
+  ctx.fillRect(TILE*2+6,6,TILE-12,TILE-12);
+
+  // Tile 3: carpet/shrine glow
+  ctx.fillStyle="#33203a"; ctx.fillRect(TILE*3,0,TILE,TILE);
+  ctx.fillStyle="rgba(255,105,180,0.20)";
+  ctx.fillRect(TILE*3+6,6,TILE-12,TILE-12);
+
+  ctex.refresh();
+
+  // Player texture
+  const ptex = scene.textures.createCanvas("player", 26, 26);
+  const pctx = ptex.getContext();
+  pctx.fillStyle="#66ccff"; pctx.fillRect(0,0,26,26);
+  pctx.fillStyle="rgba(0,0,0,0.22)"; pctx.fillRect(0,0,26,4); pctx.fillRect(0,0,4,26);
+  ptex.refresh();
+}
+
+function buildRoomGrid(roomId){
+  // 0 floor, 1 wall, 2 accent, 3 carpet
+  const grid = Array.from({length:MAP_H}, ()=> Array.from({length:MAP_W}, ()=>0));
+  for(let x=0;x<MAP_W;x++){ grid[0][x]=1; grid[MAP_H-1][x]=1; }
+  for(let y=0;y<MAP_H;y++){ grid[y][0]=1; grid[y][MAP_W-1]=1; }
+
+  const pillars = {
+    hub:[[6,5],[15,5],[6,10],[15,10]],
+    shrineA:[[10,6],[11,6],[10,9],[11,9]],
+    shrineB:[[9,8],[12,8]],
+    shrineC:[[8,6],[13,6],[8,9],[13,9]],
+    shrineD:[[11,7],[11,8]],
+  };
+  (pillars[roomId]||[]).forEach(([x,y])=>{ if(grid[y] && grid[y][x]!=null) grid[y][x]=1; });
+
+  if(roomId!=="hub"){ for(let x=2;x<MAP_W-2;x++) grid[2][x]=2; }
+
+  for(let y=6;y<=9;y++){
+    for(let x=9;x<=12;x++){
+      if(grid[y] && grid[y][x]===0) grid[y][x]=3;
+    }
+  }
+  return grid;
+}
+
+// ---------- Rooms ----------
+const Rooms = {
+  hub: {
+    playerSpawn:{x:3*TILE+16, y:8*TILE},
+    things:[
+      {type:"sign", x:4*TILE, y:3*TILE, text:"Welcome to Heart Quest.\nSolve the 4 shrines and bring the pieces to the altar."},
+      {type:"door", x:ROOM_W/2, y:1*TILE+16, to:"shrineA", label:"To Shrine A"},
+      {type:"door", x:ROOM_W-1*TILE-16, y:ROOM_H/2, to:"shrineB", label:"To Shrine B"},
+      {type:"door", x:ROOM_W/2, y:ROOM_H-1*TILE-16, to:"shrineC", label:"To Shrine C"},
+      {type:"door", x:1*TILE+16, y:ROOM_H/2, to:"shrineD", label:"To Shrine D"},
+      {type:"altar", x:ROOM_W/2, y:ROOM_H/2, label:"Final Altar"},
+    ]
+  },
+  shrineA: {
+    playerSpawn:{x:ROOM_W/2, y:ROOM_H-2*TILE},
+    things:[
+      {type:"sign", x:ROOM_W/2, y:3*TILE, text:"A tablet mentions symbols…\n(Next: hide clues around rooms.)"},
+      {type:"shrine", id:"A", x:ROOM_W/2, y:ROOM_H/2, label:"Enter Shrine A"},
+      {type:"door", x:ROOM_W/2, y:ROOM_H-1*TILE-16, to:"hub", label:"Back"},
+    ]
+  },
+  shrineB: {
+    playerSpawn:{x:2*TILE, y:ROOM_H/2},
+    things:[
+      {type:"sign", x:ROOM_W/2, y:3*TILE, text:"A door with a 4-digit seal…"},
+      {type:"shrine", id:"B", x:ROOM_W/2, y:ROOM_H/2, label:"Enter Shrine B"},
+      {type:"door", x:1*TILE+16, y:ROOM_H/2, to:"hub", label:"Back"},
+    ]
+  },
+  shrineC: {
+    playerSpawn:{x:ROOM_W/2, y:2*TILE},
+    things:[
+      {type:"sign", x:ROOM_W/2, y:3*TILE, text:"A spirit hums a tune…"},
+      {type:"shrine", id:"C", x:ROOM_W/2, y:ROOM_H/2, label:"Enter Shrine C"},
+      {type:"door", x:ROOM_W/2, y:1*TILE+16, to:"hub", label:"Back"},
+    ]
+  },
+  shrineD: {
+    playerSpawn:{x:ROOM_W-2*TILE, y:ROOM_H/2},
+    things:[
+      {type:"sign", x:ROOM_W/2, y:3*TILE, text:"Three runes await the right words…"},
+      {type:"shrine", id:"D", x:ROOM_W/2, y:ROOM_H/2, label:"Enter Shrine D"},
+      {type:"door", x:ROOM_W-1*TILE-16, y:ROOM_H/2, to:"hub", label:"Back"},
+    ]
+  },
+};
+
+// ---------- Scenes ----------
+class BootScene extends Phaser.Scene {
+  constructor(){ super("Boot"); }
+  preload() {
+    this.load.on('loaderror', (file) => {
+      console.error('Load error:', file.key, file.src);
+    });
+    // Map
+    this.load.tilemapTiledJSON("hub", "assets/maps/hub_map.json");
+    this.load.tilemapTiledJSON("shrineA", "assets/maps/shrineA.json");
+
+    // Tileset image used by the hub map
+    this.load.image("basictiles", "assets/tiles/basictiles.png");
+    this.load.image("tilesetGreen", "assets/tiles/tileset_green.png");
+
+    // Player sprite (we’ll use the transparent one)
+    this.load.image("playerSheet", "assets/sprites/sprite_no_bg.png");
+    }
+  create(){
+    const w=this.scale.width, h=this.scale.height;
+    addPanel(this, w/2-320, h/2-200, 640, 380);
+    centerText(this, w/2, h/2-120, "HEART QUEST", 42);
+    centerText(this, w/2, h/2-65, "A tiny Zelda-like Valentine adventure", 18);
+    smallText(this, w/2-280, h/2-20,
+`Controls
+- Desktop: WASD/Arrows + Space
+- Mobile: D-pad + A
+
+Replay: ?seed=0214 or ?seed=VALENTINE
+
+Goal: Solve 4 shrines → collect 4 heart pieces → assemble the final heart.`);
+    centerText(this, w/2, h/2+150, "Press SPACE (or tap) to begin", 20);
+
+    this.input.keyboard.once("keydown-SPACE", ()=> this.scene.start("World",{roomId:"hub"}));
+    this.input.once("pointerdown", ()=> this.scene.start("World",{roomId:"hub"}));
+  }
+}
+
+function split2x2Sprite(scene, key, frameW, frameH) {
+  const base = scene.textures.get(key).getSourceImage();
+  for (let i = 0; i < 4; i++) {
+    const x = (i % 2) * frameW;
+    const y = Math.floor(i / 2) * frameH;
+    const newKey = `${key}_${i}`;
+    if (scene.textures.exists(newKey)) continue;
+
+    const rt = scene.textures.createCanvas(newKey, frameW, frameH);
+    const ctx = rt.getContext();
+    ctx.drawImage(base, x, y, frameW, frameH, 0, 0, frameW, frameH);
+    rt.refresh();
+  }
+}
+
+
+class WorldScene extends Phaser.Scene {
+  constructor(){ super("World"); }
+
+  create(data) {
+    this.cameras.main.fadeIn(1000, 0, 0, 0);
+    this.keys = this.input.keyboard.addKeys({
+      up:"W", down:"S", left:"A", right:"D",
+      up2:"UP", down2:"DOWN", left2:"LEFT", right2:"RIGHT",
+      space:"SPACE", esc:"ESC"
+    });
+
+  this.roomId = (data && data.roomId) ? data.roomId : "hub";
+
+  // --- TILEMAP (from Tiled JSON) ---
+  const mapKey = this.roomId;     // roomId should be "hub", "shrineA", etc.
+  const tiledMap = this.make.tilemap({ key: mapKey });
+  this.currentMapKey = mapKey;
+
+
+  // IMPORTANT:
+  // - First arg: tileset NAME inside Tiled (from hub_map.json -> tilesets[0].name)
+  // - Second arg: key from this.load.image(...)
+  //const tileset = tiledMap.addTilesetImage("tileset_green", "tilesetGreen");
+  const tsGreen = tiledMap.addTilesetImage("tileset_green", "tilesetGreen");
+  const tsBasic = tiledMap.addTilesetImage("basictiles", "basictiles");
+
+  // Layer names MUST match Tiled exactly (case + spaces)
+  const groundLayer = tiledMap.createLayer("Ground Layer", [tsGreen, tsBasic], 0, 0);
+  const decorLayer  = tiledMap.createLayer("Decor Layer",  [tsGreen, tsBasic], 0, 0);
+
+  // Enable collisions on any layer that contains tiles with collides=true
+  groundLayer.setCollisionByProperty({ collides: true });
+  decorLayer.setCollisionByProperty({ collides: true });
+
+  // World bounds = map size
+  this.physics.world.setBounds(0, 0, tiledMap.widthInPixels, tiledMap.heightInPixels);
+
+  // --- Spawn from Object Layer ---
+  // Object layer name MUST match Tiled exactly
+  const objectsLayer = tiledMap.getObjectLayer("Object Layer");
+  const spawnObj = objectsLayer?.objects?.find(o => o.name === "spawn"); // recommend lowercase "spawn"
+
+  const spawnX = spawnObj ? spawnObj.x : 100;
+  const spawnY = spawnObj ? spawnObj.y : 200;
+
+  // --- Player sprite ---
+  split2x2Sprite(this, "playerSheet", 512, 512);
+
+  this.player = this.physics.add.sprite(spawnX, spawnY, "playerSheet_0");
+  this.player.setScale(0.07);
+  this.player.setCollideWorldBounds(true);
+
+  // Player collisions with tile layers
+  this.physics.add.collider(this.player, groundLayer);
+  this.physics.add.collider(this.player, decorLayer);
+
+  // --- Interactables (keep for now; later we’ll move these into Tiled objects) ---
+  // NOTE: Your old Rooms[] coords are in a 700x520 world; they won't match a 704x512 tilemap unless you update them.
+  // For now you can comment these out to avoid “invisible” triggers placed in the wrong spot.
+  this.interactables = this.physics.add.staticGroup();
+  //this.altarObj = null;
+  //this.altarLabel = null;
+
+  // TODO: either (A) port interactables to Tiled object layer, or (B) update their coords to match your tilemap.
+  // room.things.forEach(...) can stay once those coords are correct.
+
+  // HUD + prompt
+  this.hud = this.add.text(14, 10, this.hudText(), { fontFamily:"system-ui", fontSize:"14px", color:"#fff" });
+  this.prompt = this.add.text(14, 30, "", { fontFamily:"system-ui", fontSize:"14px", color:"#ffe" });
+
+  // Touch controls
+  this.touch = { up:false, down:false, left:false, right:false, a:false };
+  this.createTouchControls();
+
+  this.updateAltarVisibility();
+}
+
+  transitionToRoom(toRoomId, spawnName = "spawn") {
+    // prevent double-triggering
+    if (this._transitioning) return;
+    this._transitioning = true;
+
+    const cam = this.cameras.main;
+
+    cam.fadeOut(1000, 0, 0, 0);
+
+    cam.once("camerafadeoutcomplete", () => {
+      this.scene.start("World", { roomId: toRoomId, spawn: spawnName });
+    });
+  }
+
+
+  hudText(){ return `Heart Pieces: ${GameState.hearts}/${GameState.totalHearts}   |   Seed: ${GameState.seed}`; }
+
+  updateAltarVisibility(){
+    const show = GameState.hearts >= GameState.totalHearts;
+    if(this.altarObj){ this.altarObj.setVisible(show); this.altarObj.body.enable=show; }
+    if(this.altarLabel) this.altarLabel.setVisible(show);
+  }
+
+  createTouchControls(){
+    if(!this.sys.game.device.input.touch) return;
+    const w=this.scale.width, h=this.scale.height;
+    const baseX=90, baseY=h-90, r=28;
+
+    const mkBtn=(x,y,label,onDown,onUp)=>{
+      const hit=this.add.circle(x,y,r,0xffffff,0.06).setInteractive();
+      this.add.text(x,y,label,{fontFamily:"system-ui",fontSize:"14px",color:"#fff"}).setOrigin(0.5);
+      hit.on("pointerdown",onDown);
+      hit.on("pointerup",onUp);
+      hit.on("pointerout",onUp);
+      return hit;
+    };
+
+    mkBtn(baseX,baseY-42,"▲",()=>this.touch.up=true,()=>this.touch.up=false);
+    mkBtn(baseX,baseY+42,"▼",()=>this.touch.down=true,()=>this.touch.down=false);
+    mkBtn(baseX-42,baseY,"◀",()=>this.touch.left=true,()=>this.touch.left=false);
+    mkBtn(baseX+42,baseY,"▶",()=>this.touch.right=true,()=>this.touch.right=false);
+
+    const ax=w-90, ay=h-90;
+    const a=this.add.circle(ax,ay,34,0xff6699,0.18).setInteractive();
+    this.add.text(ax,ay,"A",{fontFamily:"system-ui",fontSize:"16px",color:"#fff"}).setOrigin(0.5);
+    a.on("pointerdown",()=>this.touch.a=true);
+    a.on("pointerup",()=>this.touch.a=false);
+    a.on("pointerout",()=>this.touch.a=false);
+
+    this.add.text(w/2,h-18,"Use D-pad + A",{fontFamily:"system-ui",fontSize:"12px",color:"#bbb"}).setOrigin(0.5);
+  }
+
+  consumeTouchA(){ if(!this.touch.a) return false; this.touch.a=false; return true; }
+
+  update(){
+    const speed=120;
+    const left=this.keys.left.isDown||this.keys.left2.isDown||this.touch.left;
+    const right=this.keys.right.isDown||this.keys.right2.isDown||this.touch.right;
+    const up=this.keys.up.isDown||this.keys.up2.isDown||this.touch.up;
+    const down=this.keys.down.isDown||this.keys.down2.isDown||this.touch.down;
+
+    let vx=0, vy=0;
+    if(left) vx-=speed; if(right) vx+=speed; if(up) vy-=speed; if(down) vy+=speed;
+    if(vx!==0 && vy!==0){ vx*=0.7071; vy*=0.7071; }
+    this.player.setVelocity(vx,vy);
+
+    // Only run if player exists and sprite frames were created
+    if (this.player && this.textures.exists("playerSheet_0")) {
+      if (vx === 0 && vy === 0) {
+        // idle
+      } else if (Math.abs(vx) > Math.abs(vy)) {
+        this.player.setTexture("playerSheet_1");
+        this.player.setFlipX(vx > 0);
+      } else {
+        this.player.setFlipX(false);
+        this.player.setTexture(vy > 0 ? "playerSheet_0" : "playerSheet_2");
+      }
+    }
+
+    this.updateAltarVisibility();
+
+    // Nearest interactable
+    let near=null, best=Infinity;
+    this.interactables.getChildren().forEach(obj=>{
+      if(!obj.visible) return;
+      const d=Phaser.Math.Distance.Between(this.player.x,this.player.y,obj.x,obj.y);
+      if(d<82 && d<best){ best=d; near=obj; }
+    });
+
+    if(near){
+      const kind=near.getData("kind");
+      if(kind==="sign") this.prompt.setText("Press SPACE / tap A to read");
+      if(kind==="door") this.prompt.setText("Press SPACE / tap A to go: "+near.getData("label"));
+      if(kind==="shrine"){
+        const id=near.getData("id");
+        this.prompt.setText(GameState.puzzleDone[id] ? (near.getData("label")+" complete ✓") : ("Press SPACE / tap A to enter "+near.getData("label")));
+      }
+      if(kind==="altar") this.prompt.setText("Press SPACE / tap A to assemble the heart");
+    } else this.prompt.setText("");
+
+    const interact = Phaser.Input.Keyboard.JustDown(this.keys.space) || this.consumeTouchA();
+    if(interact && near){
+      const kind=near.getData("kind");
+      if(kind==="sign"){ this.scene.start("Dialog",{returnTo:{scene:"World",roomId:this.roomId},title:"Sign",body:near.getData("text")}); return; }
+      if (kind === "door") {
+        const toRoom = near.getData("to");
+        const spawnName = near.getData("spawn") || "spawn";
+        this.transitionToRoom(toRoom, spawnName);
+        return;
+      }
+      if(kind==="shrine"){ const id=near.getData("id"); if(!GameState.puzzleDone[id]) this.scene.start("Puzzle"+id); return; }
+      if(kind==="altar"){ this.scene.start("Final"); return; }
+    }
+
+    this.hud.setText(this.hudText());
+  }
+}
+
+class DialogScene extends Phaser.Scene {
+  constructor(){ super("Dialog"); }
+  create(data){
+    const w=this.scale.width, h=this.scale.height;
+    addPanel(this,w/2-320,h/2-200,640,380);
+    centerText(this,w/2,h/2-140,data.title||"",26);
+    smallText(this,w/2-280,h/2-90,data.body||"");
+    centerText(this,w/2,h/2+150,"Press SPACE (or tap) to continue",18);
+    const back=()=> this.scene.start("World",{roomId:(data.returnTo && data.returnTo.roomId) ? data.returnTo.roomId : "hub"});
+    this.input.keyboard.once("keydown-SPACE",back);
+    this.input.once("pointerdown",back);
+  }
+}
+
+// (Puzzles / ItemGet / Final unchanged from earlier draft)
+// If you want, next message I’ll paste the Puzzle scenes back in to keep this reply shorter.
+
+const config = {
+  type: Phaser.AUTO,
+  width: ROOM_W,
+  height: ROOM_H,
+  backgroundColor: "#0f0f12",
+  physics: { default: "arcade", arcade: { debug:false } },
+  scale: { mode: Phaser.Scale.FIT, autoCenter: Phaser.Scale.CENTER_BOTH },
+  scene: [BootScene, WorldScene, DialogScene /* + your Puzzle scenes here */]
+};
+new Phaser.Game(config);
+</script>
+</body>
+</html>
