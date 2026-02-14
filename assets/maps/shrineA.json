@@ -44,9 +44,32 @@
          "width":44,
          "x":0,
          "y":0
+        }, 
+        {
+         "draworder":"topdown",
+         "id":2,
+         "name":"Object Layer",
+         "objects":[
+                {
+                 "height":0,
+                 "id":1,
+                 "name":"spawn",
+                 "point":true,
+                 "rotation":0,
+                 "type":"",
+                 "visible":true,
+                 "width":0,
+                 "x":689.3058733791,
+                 "y":284.118993135011
+                }],
+         "opacity":1,
+         "type":"objectgroup",
+         "visible":true,
+         "x":0,
+         "y":0
         }],
- "nextlayerid":2,
- "nextobjectid":1,
+ "nextlayerid":3,
+ "nextobjectid":2,
  "orientation":"orthogonal",
  "renderorder":"right-down",
  "tiledversion":"1.11.2",
@@ -68,7 +91,7 @@
         {
          "columns":8,
          "firstgid":81,
-         "image":"../tiles/basictiles.png",
+         "image":"..\/tiles\/basictiles.png",
          "imageheight":240,
          "imagewidth":128,
          "margin":0,

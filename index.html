@@ -202,7 +202,8 @@ class BootScene extends Phaser.Scene {
 
     // Tileset image used by the hub map
     this.load.image("basictiles", "assets/tiles/basictiles.png");
-    this.load.image("tilesetGreen", "assets/tiles/tileset_green.png");
+    this.load.image("tileset_green", "assets/tiles/tileset_green.png");
+    this.load.image("tileset_gray", "assets/tiles/tileset_gray.png");
 
     // Player sprite (we’ll use the transparent one)
     this.load.image("playerSheet", "assets/sprites/sprite_no_bg.png");
@@ -262,28 +263,40 @@ class WorldScene extends Phaser.Scene {
   this.currentMapKey = mapKey;
 
 
-  // IMPORTANT:
-  // - First arg: tileset NAME inside Tiled (from hub_map.json -> tilesets[0].name)
-  // - Second arg: key from this.load.image(...)
-  //const tileset = tiledMap.addTilesetImage("tileset_green", "tilesetGreen");
-  const tsGreen = tiledMap.addTilesetImage("tileset_green", "tilesetGreen");
-  const tsBasic = tiledMap.addTilesetImage("basictiles", "basictiles");
 
-  // Layer names MUST match Tiled exactly (case + spaces)
-  const groundLayer = tiledMap.createLayer("Ground Layer", [tsGreen, tsBasic], 0, 0);
-  const decorLayer  = tiledMap.createLayer("Decor Layer",  [tsGreen, tsBasic], 0, 0);
+  // --- TILESETS: add all tilesets that this map actually uses ---
+  const tilesets = [];
+  tiledMap.tilesets.forEach((ts) => {
+    // ts.name is the tileset name INSIDE Tiled
+    // You must preload an image with a key that matches how you map tileset names to image keys.
+    // Easiest: make your preload keys match Tiled names exactly.
+    const imageKey = ts.name; 
+    const added = tiledMap.addTilesetImage(ts.name, imageKey);
+    if (added) tilesets.push(added);
+    else console.warn(`Could not add tileset "${ts.name}" using image key "${imageKey}"`);
+  });
 
-  // Enable collisions on any layer that contains tiles with collides=true
-  groundLayer.setCollisionByProperty({ collides: true });
-  decorLayer.setCollisionByProperty({ collides: true });
+  // --- LAYERS: create all tile layers the map has ---
+  const createdLayers = [];
+  tiledMap.layers.forEach((layerData) => {
+    const name = layerData.name;
+    const layer = tiledMap.createLayer(name, tilesets, 0, 0);
+    if (layer) createdLayers.push(layer);
+  });
 
-  // World bounds = map size
-  this.physics.world.setBounds(0, 0, tiledMap.widthInPixels, tiledMap.heightInPixels);
+  if (createdLayers.length === 0) {
+    console.error("No tile layers were created. Valid layer names:", tiledMap.layers.map(l => l.name));
+    return;
+  }
 
   // --- Spawn from Object Layer ---
   // Object layer name MUST match Tiled exactly
   const objectsLayer = tiledMap.getObjectLayer("Object Layer");
-  const spawnObj = objectsLayer?.objects?.find(o => o.name === "spawn"); // recommend lowercase "spawn"
+  // use spawn passed from transition, default to "spawn"
+  const spawnName = (data && data.spawn) ? data.spawn : "spawn";
+
+  // find object by name
+  const spawnObj = objectsLayer?.objects?.find(o => o.name === spawnName);
 
   const spawnX = spawnObj ? spawnObj.x : 100;
   const spawnY = spawnObj ? spawnObj.y : 200;
@@ -295,9 +308,17 @@ class WorldScene extends Phaser.Scene {
   this.player.setScale(0.07);
   this.player.setCollideWorldBounds(true);
 
-  // Player collisions with tile layers
-  this.physics.add.collider(this.player, groundLayer);
-  this.physics.add.collider(this.player, decorLayer);
+  // collisions on all layers (or pick specific ones)
+  createdLayers.forEach((layer) => {
+    layer.setCollisionByProperty({ collides: true });
+    // optional fallback if you still have the bad property name in some maps:
+    layer.forEachTile(t => { if (t.properties?.["collides = true"] === true) t.setCollision(true); });
+    this.physics.add.collider(this.player, layer);
+  });
+
+  // World bounds = map size
+  this.physics.world.setBounds(0, 0, tiledMap.widthInPixels, tiledMap.heightInPixels);
+
 
   // --- Interactables (keep for now; later we’ll move these into Tiled objects) ---
   // NOTE: Your old Rooms[] coords are in a 700x520 world; they won't match a 704x512 tilemap unless you update them.
@@ -305,6 +326,7 @@ class WorldScene extends Phaser.Scene {
   this.interactables = this.physics.add.staticGroup();
   //this.altarObj = null;
   //this.altarLabel = null;
+  this.createMapDoors(objectsLayer, tiledMap);
 
   // TODO: either (A) port interactables to Tiled object layer, or (B) update their coords to match your tilemap.
   // room.things.forEach(...) can stay once those coords are correct.
@@ -319,6 +341,47 @@ class WorldScene extends Phaser.Scene {
 
   this.updateAltarVisibility();
 }
+
+  createMapDoors(objectsLayer, tiledMap) {
+    if (objectsLayer?.objects?.length) {
+      objectsLayer.objects.forEach((obj) => {
+        const propMap = Object.fromEntries((obj.properties || []).map(p => [p.name, p.value]));
+
+        // allow "to" or "To"
+        const toRoom = propMap.to ?? propMap.To;
+        if (!toRoom) return;
+
+        const x = obj.x + (obj.width || 0) / 2;
+        const y = obj.y + (obj.height || 0) / 2;
+        const w = obj.width || 32;
+        const h = obj.height || 32;
+
+        // invisible trigger zone
+        const zone = this.add.zone(x, y, w, h);
+        this.physics.add.existing(zone, true); // static body
+        this.interactables.add(zone);
+
+        zone.setData("kind", "door");
+        const raw = String(toRoom);
+        const normalized = raw[0].toLowerCase() + raw.slice(1); // ShrineA -> shrineA
+        zone.setData("to", normalized); // "ShrineA" -> "shrineA" if you want
+        zone.setData("label", toRoom);
+        zone.setData("spawn", propMap.spawn ?? propMap.Spawn ?? "spawn");
+      });
+    }
+
+    // fallback if no doors found
+    if (this.interactables.getChildren().length === 0 && this.roomId === "shrineA") {
+      const zone = this.add.zone(tiledMap.widthInPixels / 2, tiledMap.heightInPixels - 24, 64, 64);
+      this.physics.add.existing(zone, true);
+      this.interactables.add(zone);
+      zone.setData("kind", "door");
+      zone.setData("to", "hub");
+      zone.setData("label", "hub");
+      zone.setData("spawn", "spawn");
+    }
+  }
+
 
   transitionToRoom(toRoomId, spawnName = "spawn") {
     // prevent double-triggering
@@ -375,6 +438,7 @@ class WorldScene extends Phaser.Scene {
   consumeTouchA(){ if(!this.touch.a) return false; this.touch.a=false; return true; }
 
   update(){
+    if (!this.player) return;
     const speed=120;
     const left=this.keys.left.isDown||this.keys.left2.isDown||this.touch.left;
     const right=this.keys.right.isDown||this.keys.right2.isDown||this.touch.right;
@@ -419,6 +483,8 @@ class WorldScene extends Phaser.Scene {
       }
       if(kind==="altar") this.prompt.setText("Press SPACE / tap A to assemble the heart");
     } else this.prompt.setText("");
+    this.hud.setScrollFactor(0);
+    this.prompt.setScrollFactor(0);
 
     const interact = Phaser.Input.Keyboard.JustDown(this.keys.space) || this.consumeTouchA();
     if(interact && near){
