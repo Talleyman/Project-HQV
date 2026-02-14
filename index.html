@@ -2,7 +2,7 @@
 <html>
 <head>
   <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no" />
+  <meta name="viewport" content="width=device-width, height=device-height, initial-scale=1, viewport-fit=cover, user-scalable=no">
   <title>Heart Quest</title>
   <style>
     html, body { margin:0; padding:0; background:#0f0f12; height:100%; overflow:hidden; }
@@ -210,6 +210,12 @@ class BootScene extends Phaser.Scene {
     }
   create(){
     const w=this.scale.width, h=this.scale.height;
+    // 👇 ADD THIS
+    this.input.once("pointerdown", () => {
+      if (!this.scale.isFullscreen) {
+        this.scale.startFullscreen();
+      }
+    });
     addPanel(this, w/2-320, h/2-200, 640, 380);
     centerText(this, w/2, h/2-120, "HEART QUEST", 42);
     centerText(this, w/2, h/2-65, "A tiny Zelda-like Valentine adventure", 18);
@@ -248,6 +254,7 @@ class WorldScene extends Phaser.Scene {
   constructor(){ super("World"); }
 
   create(data) {
+    this._transitioning = false;   // ✅ reset each time the scene starts
     this.cameras.main.fadeIn(1000, 0, 0, 0);
     this.keys = this.input.keyboard.addKeys({
       up:"W", down:"S", left:"A", right:"D",
@@ -362,25 +369,35 @@ class WorldScene extends Phaser.Scene {
         this.interactables.add(zone);
 
         zone.setData("kind", "door");
-        const raw = String(toRoom);
-        const normalized = raw[0].toLowerCase() + raw.slice(1); // ShrineA -> shrineA
-        zone.setData("to", normalized); // "ShrineA" -> "shrineA" if you want
-        zone.setData("label", toRoom);
-        zone.setData("spawn", propMap.spawn ?? propMap.Spawn ?? "spawn");
+
+        // Normalize To values like "ShrineA" -> "shrineA"
+        const rawTo = String(toRoom);
+        const normalizedTo = rawTo[0].toLowerCase() + rawTo.slice(1);
+        zone.setData("to", normalizedTo);
+
+        // ✅ Label support (Label/label property), fallback to "Go to X"
+        const label = propMap.label ?? propMap.Label ?? `Go to ${rawTo}`;
+        zone.setData("label", String(label));
+
+        // Spawn support (Spawn/spawn property), default "spawn"
+        const spawnName = propMap.spawn ?? propMap.Spawn ?? "spawn";
+        zone.setData("spawn", String(spawnName));
       });
     }
 
-    // fallback if no doors found
+    // fallback if no doors found (optional)
     if (this.interactables.getChildren().length === 0 && this.roomId === "shrineA") {
-      const zone = this.add.zone(tiledMap.widthInPixels / 2, tiledMap.heightInPixels - 24, 64, 64);
+      const zone = this.add.zone(tiledMap.widthInPixels - 24, tiledMap.heightInPixels / 2, 64, 64);
       this.physics.add.existing(zone, true);
       this.interactables.add(zone);
+
       zone.setData("kind", "door");
       zone.setData("to", "hub");
-      zone.setData("label", "hub");
+      zone.setData("label", "Return to hub");
       zone.setData("spawn", "spawn");
     }
   }
+
 
 
   transitionToRoom(toRoomId, spawnName = "spawn") {
