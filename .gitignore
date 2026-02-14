@@ -10,6 +10,10 @@ project.config
 # Node (if ever used)
 node_modules/
 
+# Ignore the Phaser library
+phaser.js
+phaser.min.js
+
 # Logs
 *.log
 
